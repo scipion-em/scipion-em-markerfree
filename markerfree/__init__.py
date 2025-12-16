@@ -80,8 +80,9 @@ class Plugin(pwem.Plugin):
             mkfr = cls._getProgram(MARKERFREE_CMD)
 
             cls._validationMsg = [
+                "%s - Not found" 
                 "MKFR's %s command not found in path, please "
-                "install it." % mkfr] if not which(
+                "install it." % (MARKERFREE_CMD, mkfr)] if not which(
                 MARKERFREE_CMD) and not os.path.exists(mkfr) else []
 
         return cls._validationMsg
@@ -98,7 +99,7 @@ class Plugin(pwem.Plugin):
         installationCmd += ' conda activate %s && ' % MARKERFREE_ENV_NAME
 
         # Install MKFR
-        # TODO: COMPILE
+        # TODO: COMPILATION
 
         MKFR_commands = [(installationCmd, MARKERFREE_INSTALLED)]
         envPath = os.environ.get('PATH', "") # Keep path, Conda is likely there
@@ -124,8 +125,8 @@ class Plugin(pwem.Plugin):
     @classmethod
     def runMarkerfree(cls, protocol, args, cwd=None, numberOfMpi=1):
         """ Run Markerfree command from a given protocol. """
-        cmd = cls.getCondaActivationCmd() + " "
-        cmd += cls.getMarkerfreeEnvActivation() + " "
-        cmd += f"&& export PATH={cls.getHome('build/bin')}:PATH "
-        cmd += f"&& {TSALIGN_PROGRAM}"
+        #cmd += cls.getMarkerfreeEnvActivation() + " "
+        # cmd += f"&& export PATH={cls.getHome('build/bin')}:PATH "
+        # cmd += f"&& {TSALIGN_PROGRAM}"
+        cmd = "Markerfree"
         protocol.runJob(cmd, args, env=cls.getEnviron(), cwd=cwd, numberOfMpi=1)
