@@ -22,7 +22,7 @@ Scipion plugin for Markerfree
         :target: https://pypi.python.org/pypi/scipion-em-markerfree
         :alt: Downloads
 
-This plugin provide a wrapper around the program `markerfree <https://teamtomo.org/markerfree/>`_ to use it within 
+This plugin provide a wrapper around the program `markerfree <https://github.com/icthrm/Markerfree>`_ to use it within 
 `Scipion <https://scipion-em.github.io/docs/release-3.0.0/index.html>`_ framework.
 
 Installation
@@ -66,7 +66,7 @@ markerfree software package is available under `BSD-3-Clause license <https://op
 Protocols
 ---------
 
-* **Tilt-series: detect and erase fiducials.**
+* **Align tilt-series.**
 
 Latest plugin versions
 ----------------------
