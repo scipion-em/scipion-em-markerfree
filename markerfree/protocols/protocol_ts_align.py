@@ -1,6 +1,7 @@
 # **************************************************************************
 # *
 # * Authors:     Mikel Iceta (miceta@cnb.csic.es)
+# * Authors:     JL Vilas (jl.vilas@cnb.csic.es)
 # *
 # * National Center of Biotechnology (CNB-CSIC)
 # *
@@ -25,23 +26,26 @@
 # **************************************************************************
 
 import logging
-import subprocess
 import traceback
-import typing
 import time
 import os
 from collections import Counter
 from enum import Enum
+from typing import List, Tuple, Union
+import numpy as np
 
 from pwem.emlib import DT_FLOAT
 from pwem.protocols import EMProtocol
+
 from pyworkflow.constants import BETA
 import pyworkflow.protocol.params as params
+from pyworkflow.object import Set, Pointer
 from pyworkflow.protocol import STEPS_PARALLEL, LEVEL_ADVANCED, ProtStreamingBase
-from pyworkflow.utils import makePath, Message, cyanStr, redStr
+from pyworkflow.utils import makePath, cyanStr, redStr
 
 from markerfree import Plugin
 from markerfree.constants import *
+from markerfree.convert import readXfFile
 
 from tomo.protocols import ProtTomoBase
 from tomo.objects import SetOfTiltSeries, TiltSeries, TiltImage, Pointer
@@ -54,11 +58,12 @@ IN_TS_SET = 'inTsSet'
 # Auxiliar variables
 EVEN_SUFFIX = '_even'
 ODD_SUFFIX = '_odd'
+IDENTITY_MATRIX = np.eye(3)  # Store in memory instead of multiple creation
 
 class markerfreeOutputs(Enum):
     tiltSeries = SetOfTiltSeries
 
-class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
+class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase):
     """Protocol to align tilt series using MarkerFree.
     """
 
@@ -136,16 +141,13 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
                 tsId = ts.getTsId()
                 
                 if tsId not in self.itemTsIdReadList and ts.getSize() > 0:  # Avoid processing empty TS (wait for TS imgs to be added)
-                    cInputId = self._insertFunctionStep(self.convertInputStep, tsId,
-                                                        prerequisites=[],
-                                                        needsGPU=False)
                     tsAlignId = self._insertFunctionStep(self.runMarkerfreeStep, tsId,
-                                                            prerequisites=cInputId,
+                                                            prerequisites=[],
                                                             needsGPU=True)
-                    # cOutId = self._insertFunctionStep(self.createOutputStep, tsId,
-                    #                                     prerequisites=tsAlignId,
-                    #                                     needsGPU=False)
-                    closeSetStepDeps.append(tsAlignId)
+                    cOutId = self._insertFunctionStep(self.createOutputStep, tsId,
+                                                        prerequisites=tsAlignId,
+                                                        needsGPU=False)
+                    closeSetStepDeps.append(cOutId)
                     logger.info(cyanStr(f"Steps created for tsId = {tsId}"))
                     self.itemTsIdReadList.append(tsId)
 
@@ -154,17 +156,12 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
                 with self._lock:
                     inTsSet.loadAllProperties()  # refresh status for the streaming
 
-    def convertInputStep(self, tsId: str):
-        pass 
-        #ts = self._getCurrentItem(tsId)
-        #tsFileName = ts.getFirstEnableItem().getFileName()
-
     def runMarkerfreeStep(self, tsId: str):
         if tsId not in self.failedItems:
             try:
                 logger.info(cyanStr(f'tsId = {tsId}: aligning...'))
                 with self._lock:
-                    ts = self.getCurrentTs(tsId)
+                    ts = self._getCurrentTs(tsId)
                 tsIdPath = self._getExtraPath(tsId)
                 makePath(tsIdPath)
                 tltFn = os.path.join(tsIdPath, tsId + ".rawtlt")
@@ -174,19 +171,19 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
                 # TODO: Change for getFirstEnableItem() when TODO tomo is updated
                 cmd += "-i %s " % ts.getFirstItem().getFileName()
                 # Output MRC
-                cmd += "-o %s " % self._getExtraPath(tsId, tsId + "_aligned.mrc")
+                cmd += "-o %s " % self._getExtraOutFile(tsId, "aligned", MRC_EXT) #self._getExtraPath(tsId, tsId + "_aligned.mrc")
                 # Tilt angle file
                 cmd += "-a %s " % tltFn
                 # Geometry -g offset, tilt axis angle, z-axis offset, 
                 # thickness, projection matching reconstruction thickness, 
                 # output image downsampling ratio, GPU ID
-                offset = 0
+                offset = 0 #TODO
                 taAngle = ts.getAcquisition().getTiltAxisAngle()
-                zaOffset = 0
+                zaOffset = 0 #TODO
                 thickness = self.geomThickness.get()
                 projThickness = self.geomReconThickness.get()
                 dsRatio = self.geomDownsample.get()
-                gpuId = 0
+                gpuId = 0 #TODO
                 cmd += "-g %d,%d,%d,%d,%d,%d,%d " % (offset, taAngle, zaOffset, thickness,
                                                      projThickness, dsRatio, gpuId)
                 # The number of images used during the projection matching
@@ -200,49 +197,117 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
                 logger.error(redStr(f'tsId = {tsId} -> MarkerFree execution failed with the exception -> {e}'))
                 logger.error(traceback.format_exc())
 
-    '''
     def createOutputStep(self, tsId: str):
         if tsId in self.failedItems:
             self.addToOutFailedSet(tsId)
             return
         try:
             with self._lock:
-                ts = self.getCurrentTs(tsId)
-                self.createOutTs(ts, self.getInputTsSet(pointer=True))
+                ts = self._getCurrentTs(tsId)
+                self.createOutTs(ts, self._getInTsSet(returnPointer=True))
         except Exception as e:
             logger.error(redStr(f'tsId = {tsId} -> Unable to register the output with exception {e}. Skipping... '))
             logger.error(traceback.format_exc())
 
+    # --------------------------- I/O functions ------------------------------
+    def getOutputFailedSet(self,
+                           inputPtr: Pointer) -> SetOfTiltSeries:
+        """ Create output set for failed TS. """
+        inputSet = inputPtr.get()
+        failedTs = getattr(self, OUTPUT_TS_FAILED_NAME, None)
+        if failedTs:
+                failedTs.enableAppend()
+        else:
+            logger.info(cyanStr('Create the set of failed TS'))
+            failedTs = self._createSetOfTiltSeries(suffix='Failed')
+            failedTs.copyInfo(inputSet)
+            failedTs.setStreamState(Set.STREAM_OPEN)
+            self._defineOutputs(**{OUTPUT_TS_FAILED_NAME: failedTs})
+            self._defineSourceRelation(inputPtr, failedTs)
+
+        return failedTs
+
     def addToOutFailedSet(self,
-                          tsId: str,
-                          inputsAreTs: bool = True) -> None:
+                          tsId: str) -> None:
         """ Just copy input item to the failed output set. """
         logger.info(cyanStr(f'Failed TS ---> {tsId}'))
         try:
             with self._lock:
-                inputSet = self.getInputTsSet(pointer=True) if inputsAreTs else self.getInputTomoSet(pointer=True)
-                output = self.getOutputFailedSet(inputSet, inputsAreTs=inputsAreTs)
-                item = self.getCurrentTs(tsId) if inputsAreTs else self.getCurrentTomo(tsId)
+                inputSet = self._getInTsSet(returnPointer=True)
+                output = self.getOutputFailedSet(inputSet)
+                item = self._getCurrentTs(tsId)
                 newItem = item.clone()
                 newItem.copyInfo(item)
                 output.append(newItem)
-
-                if isinstance(item, TiltSeries):
-                    newItem.copyItems(item)
-                    newItem.write()
+                
+                newItem.copyItems(item)
+                newItem.write()
 
                 output.update(newItem)
                 output.write()
                 self._store(output)
-                # Close explicitly the outputs (for streaming)
+                # Explicitly close the outputs (for streaming)
                 output.close()
         except Exception as e:
             logger.error(redStr(f'tsId = {tsId} -> Unable to register the failed output with '
                                 f'exception {e}. Skipping... '))
-    '''
-    def _getInTsSet(self, returnPointer: bool = False) -> typing.Union[SetOfTiltSeries, Pointer]:
-        inTsPointer = getattr(self, IN_TS_SET)
-        return inTsPointer if returnPointer else inTsPointer.get()
+
+    def getOutputSetOfTS(self, inPointer: Pointer):
+        #TODO: implement vaga de mierda
+        pass
+
+    def createOutTs(self,
+                    ts: TiltSeries,
+                    inTsSetPointer: Pointer) -> None:
+        tsId = ts.getTsId()
+        xfFile = self._getExtraOutFile(tsId, "aligned", XF_EXT)
+        if os.path.exists(xfFile) and os.stat(xfFile).st_size != 0:
+            tltFile = self.getTltFilePath(tsId)
+            aliMatrix = readXfFile(xfFile)
+            tiltAngles = self.formatAngleList(tltFile) #TODO: como se adapta esto a esta vaina jejeje?
+            # Set of tilt-series
+            outTsSet = self.getOutputSetOfTS(inTsSetPointer)  #TODO #TODO #TODO
+            # Tilt-series
+            outTs = TiltSeries()
+            outTs.copyInfo(ts)
+            outTs.setAlignment2D()
+            outTsSet.append(outTs)
+            # Tilt-images
+            stackIndex = 0
+            for ti in ts.iterItems(orderBy=TiltImage.INDEX_FIELD):
+                outTi = TiltImage()
+                outTi.copyInfo(ti)
+                if ti.isEnabled():
+                    tiltAngle, newTransformArray = self._getTrDataEnabled(stackIndex,
+                                                                          aliMatrix,
+                                                                          tiltAngles)
+                    stackIndex += 1
+                else:
+                    tiltAngle, newTransformArray = self._getTrDataDisabled(ti)
+                self._updateTiltImage(ti, outTi, newTransformArray, tiltAngle)  #TODO
+                self.setTsOddEven(tsId, outTi, binGenerated=False)  #TODO
+                outTs.append(outTi)
+            # Data persistence
+            outTs.write()
+            outTsSet.update(outTs)
+            outTsSet.write()
+            self._store(outTsSet)
+            # Close explicitly the outputs (for streaming)
+            self.closeOutputsForStreaming()
+        else:
+            logger.error(f'tsId = {tsId} -> Output file {xfFile} was not generated or is empty. Skipping... ')
+
+    def closeOutputsForStreaming(self):
+        # Explicitly close outputs (needed for streaming)
+        for outputName in self._possibleOutputs.keys():
+            output = getattr(self, outputName, None)
+            if output:
+                output.close()
+
+    # --------------------------- INFO functions ------------------------------
+    def _validate(self) -> List[str]:
+        errorMsg = []
+        return errorMsg
     
     def readingOutput(self) -> None:
         outTsSet = getattr(self, self._possibleOutputs.tiltSeries.name, None)
@@ -252,6 +317,44 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
             self.info(cyanStr(f'TsIds processed: {self.itemTsIdReadList}'))
         else:
             self.info(cyanStr('No tilt-series have been processed yet'))
+            
+    # --------------------------- UTILS functions -----------------------------
+
+    @staticmethod
+    def _getTrDataEnabled(stackIndex: int,
+                          alignmentMatrix: np.ndarray,
+                          tiltAngleList: List[float]) -> Tuple[float, np.ndarray]:
+        newTransform = alignmentMatrix[:, :, stackIndex]
+        newTransformArray = np.array(newTransform)
+        tiltAngle = float(tiltAngleList[stackIndex])
+        return tiltAngle, newTransformArray
+
+    @staticmethod
+    def _getTrDataDisabled(ti: TiltImage) -> Tuple[float, np.ndarray]:
+        tiltAngle = ti.getTiltAngle()
+        if ti.hasTransform():
+            newTransformArray = ti.getTransform().getMatrix()
+        else:
+            newTransformArray = IDENTITY_MATRIX
+        return tiltAngle, newTransformArray
+
+    def getTltFilePath(self, tsId):
+        return self._getExtraOutFile(tsId, suffix="", ext=RAWTLT_EXT)
+
+    @staticmethod
+    def _getOutTsFileName(tsId, suffix=None, ext=MRC_EXT):
+        return f'{tsId}_{suffix}.{ext}' if suffix else f'{tsId}.{ext}'
+
+    def _getExtraOutFile(self, tsId, suffix=None, ext=MRC_EXT):
+        return self._getExtraPath(tsId,
+                                  self._getOutTsFileName(tsId, suffix=suffix, ext=ext))
+
+    def _getCurrentTs(self, tsId: str) -> TiltSeries:
+        return self._getInTsSet().getItem(TiltSeries.TS_ID_FIELD, tsId)
+
+    def _getInTsSet(self, returnPointer: bool = False) -> Union[SetOfTiltSeries, Pointer]:
+        inTsPointer = getattr(self, IN_TS_SET)
+        return inTsPointer if returnPointer else inTsPointer.get()
     
     def _getCurrentItem(self, tsId: str, doLock: bool = True) -> TiltSeries:
         if doLock:
@@ -259,22 +362,3 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtStreamingBase):
                 return self._getInTsSet().getItem(TiltSeries.TS_ID_FIELD, tsId)
         else:
             return self._getInTsSet().getItem(TiltSeries.TS_ID_FIELD, tsId)
-    
-    # --------------------------- INFO functions ------------------------------
-    def _validate(self) -> typing.List[str]:
-        errorMsg = []
-        return errorMsg
-    # --------------------------- UTILS functions -----------------------------
-
-    def createOutTs(self,
-                    ts: TiltSeries,
-                    inTsPointer: Pointer) -> None:
-        pass
-
-    def getInputTsSet(self, pointer: bool = False) -> typing.Union[Pointer, SetOfTiltSeries]:
-        tsSetPointer = getattr(self, IN_TS_SET)
-        return tsSetPointer if pointer else tsSetPointer.get()
-    
-    def getCurrentTs(self, tsId: str) -> TiltSeries:
-        return self.getInputTsSet().getItem(TiltSeries.TS_ID_FIELD, tsId)
-
