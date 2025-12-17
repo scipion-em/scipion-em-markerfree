@@ -46,8 +46,8 @@ OUTPUT_TS_FAILED_NAME = "FailedTiltSeries"
 
 MRCS_EXT = 'mrcs'
 MRC_EXT = 'mrc'
-XF_EXT = 'xf'
-RAWTLT_EXT = 'rawtlt'
+XF_EXT = '.xf'
+TLT_EXT = 'tlt'
 TXT_EXT = 'txt'
 
 NONE_PROCESSED_MSG = 'Unable to process any of the introduced'

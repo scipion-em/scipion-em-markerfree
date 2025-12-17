@@ -29,6 +29,9 @@ import logging
 import traceback
 import time
 import os
+from os import stat
+from os.path import exists
+
 from collections import Counter
 from enum import Enum
 from typing import List, Tuple, Union
@@ -36,7 +39,7 @@ import numpy as np
 
 from pwem.emlib import DT_FLOAT
 from pwem.protocols import EMProtocol
-
+from pwem.objects.data import Transform
 from pyworkflow.constants import BETA
 import pyworkflow.protocol.params as params
 from pyworkflow.object import Set, Pointer
@@ -54,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 # Form variables
 IN_TS_SET = 'inTsSet'
+FAILED_TS = 'FailedTiltSeries'
 
 # Auxiliar variables
 EVEN_SUFFIX = '_even'
@@ -98,11 +102,11 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
         form.addParam(IN_TS_SET, params.PointerParam, label="Tilt Series",
                       pointerClass='SetOfTiltSeries', important=True)
 
-        form.addParam('geomOffset', params.IntParam, expertLevel=LEVEL_ADVANCED, default=0, label="Offset")
-        form.addParam('geomZAxisOffset', params.IntParam, expertLevel=LEVEL_ADVANCED, default=0, label="Z axis offset")
-        form.addParam('geomThickness', params.IntParam, default=0, label="Thickness")
-        form.addParam('geomReconThickness', params.IntParam, default=0, label="Reconstruction thickness")
-        form.addParam('geomDownsample', params.IntParam, default=0, label="Downsample factor")
+        form.addParam('geomOffset', params.FloatParam, expertLevel=LEVEL_ADVANCED, default=0.0, label="Offset")
+        form.addParam('geomZAxisOffset', params.FloatParam, expertLevel=LEVEL_ADVANCED, default=0.0, label="Z axis offset")
+        form.addParam('geomThickness', params.IntParam, default=200, label="Thickness")
+        form.addParam('geomReconThickness', params.IntParam, default=300, label="Reconstruction thickness")
+        form.addParam('geomDownsample', params.FloatParam, default=1.0, label="Downsample factor")
 
         form.addParam('nProjs', params.IntParam, expertLevel=LEVEL_ADVANCED, default=10, 
                       label="Projections",
@@ -141,6 +145,7 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
                 tsId = ts.getTsId()
                 
                 if tsId not in self.itemTsIdReadList and ts.getSize() > 0:  # Avoid processing empty TS (wait for TS imgs to be added)
+                    #TODO: Add exclude views with a convertInputStep
                     tsAlignId = self._insertFunctionStep(self.runMarkerfreeStep, tsId,
                                                             prerequisites=[],
                                                             needsGPU=True)
@@ -160,11 +165,10 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
         if tsId not in self.failedItems:
             try:
                 logger.info(cyanStr(f'tsId = {tsId}: aligning...'))
-                with self._lock:
-                    ts = self._getCurrentTs(tsId)
+                ts = self.getTsFromTsId(tsId,doLock=True)
                 tsIdPath = self._getExtraPath(tsId)
                 makePath(tsIdPath)
-                tltFn = os.path.join(tsIdPath, tsId + ".rawtlt")
+                tltFn = os.path.join(tsIdPath, tsId + ".tlt")
                 ts.generateTltFile(tltFilePath = tltFn)
                 cmd = "Markerfree "
                 # Input TS
@@ -199,74 +203,28 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
 
     def createOutputStep(self, tsId: str):
         if tsId in self.failedItems:
-            self.addToOutFailedSet(tsId)
-            return
+            self.createOutputFailedTs(tsId)
+            print('FAILED')
         try:
-            with self._lock:
-                ts = self._getCurrentTs(tsId)
-                self.createOutTs(ts, self._getInTsSet(returnPointer=True))
+            self.createOutputTs(tsId)
+            print('SUCESSED')
         except Exception as e:
             logger.error(redStr(f'tsId = {tsId} -> Unable to register the output with exception {e}. Skipping... '))
             logger.error(traceback.format_exc())
-
-    # --------------------------- I/O functions ------------------------------
-    def getOutputFailedSet(self,
-                           inputPtr: Pointer) -> SetOfTiltSeries:
-        """ Create output set for failed TS. """
-        inputSet = inputPtr.get()
-        failedTs = getattr(self, OUTPUT_TS_FAILED_NAME, None)
-        if failedTs:
-                failedTs.enableAppend()
-        else:
-            logger.info(cyanStr('Create the set of failed TS'))
-            failedTs = self._createSetOfTiltSeries(suffix='Failed')
-            failedTs.copyInfo(inputSet)
-            failedTs.setStreamState(Set.STREAM_OPEN)
-            self._defineOutputs(**{OUTPUT_TS_FAILED_NAME: failedTs})
-            self._defineSourceRelation(inputPtr, failedTs)
-
-        return failedTs
-
-    def addToOutFailedSet(self,
-                          tsId: str) -> None:
-        """ Just copy input item to the failed output set. """
-        logger.info(cyanStr(f'Failed TS ---> {tsId}'))
-        try:
-            with self._lock:
-                inputSet = self._getInTsSet(returnPointer=True)
-                output = self.getOutputFailedSet(inputSet)
-                item = self._getCurrentTs(tsId)
-                newItem = item.clone()
-                newItem.copyInfo(item)
-                output.append(newItem)
-                
-                newItem.copyItems(item)
-                newItem.write()
-
-                output.update(newItem)
-                output.write()
-                self._store(output)
-                # Explicitly close the outputs (for streaming)
-                output.close()
-        except Exception as e:
-            logger.error(redStr(f'tsId = {tsId} -> Unable to register the failed output with '
-                                f'exception {e}. Skipping... '))
-
-    def getOutputSetOfTS(self, inPointer: Pointer):
-        #TODO: implement vaga de mierda
-        pass
-
-    def createOutTs(self,
-                    ts: TiltSeries,
-                    inTsSetPointer: Pointer) -> None:
-        tsId = ts.getTsId()
-        xfFile = self._getExtraOutFile(tsId, "aligned", XF_EXT)
-        if os.path.exists(xfFile) and os.stat(xfFile).st_size != 0:
-            tltFile = self.getTltFilePath(tsId)
+    
+    def createOutputTs(self, tsId: str) -> None:
+        ts = self.getTsFromTsId(tsId,doLock=True) 
+        xfFile = self._getExtraPath(tsId, tsId+'_aligned'+XF_EXT)
+        if exists(xfFile) and stat(xfFile).st_size != 0:
+            print('entro')
+            tltFn = os.path.join(self._getExtraPath(tsId), tsId + ".tlt")
             aliMatrix = readXfFile(xfFile)
-            tiltAngles = self.formatAngleList(tltFile) #TODO: como se adapta esto a esta vaina jejeje?
+            print(aliMatrix)
+            tiltAngles = self.formatAngleList(tltFn)
+            print(tiltAngles)
             # Set of tilt-series
-            outTsSet = self.getOutputSetOfTS(inTsSetPointer)  #TODO #TODO #TODO
+            outTsSet = self.getOutputSetOfTS(self._getInTsSet())
+
             # Tilt-series
             outTs = TiltSeries()
             outTs.copyInfo(ts)
@@ -284,8 +242,7 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
                     stackIndex += 1
                 else:
                     tiltAngle, newTransformArray = self._getTrDataDisabled(ti)
-                self._updateTiltImage(ti, outTi, newTransformArray, tiltAngle)  #TODO
-                self.setTsOddEven(tsId, outTi, binGenerated=False)  #TODO
+                self._updateTiltImage(ti, outTi, newTransformArray, tiltAngle)
                 outTs.append(outTi)
             # Data persistence
             outTs.write()
@@ -294,15 +251,113 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             self._store(outTsSet)
             # Close explicitly the outputs (for streaming)
             self.closeOutputsForStreaming()
-        else:
-            logger.error(f'tsId = {tsId} -> Output file {xfFile} was not generated or is empty. Skipping... ')
 
     def closeOutputsForStreaming(self):
-        # Explicitly close outputs (needed for streaming)
+        # Close explicitly the outputs (for streaming)
         for outputName in self._possibleOutputs.keys():
             output = getattr(self, outputName, None)
             if output:
                 output.close()
+
+    @staticmethod
+    def _updateTiltImage(ti: TiltImage,
+                         outTi: TiltImage,
+                         newTransformArray: np.ndarray,
+                         tiltAngle: float) -> None:
+        transform = Transform()
+        if ti.hasTransform():
+            previousTransform = ti.getTransform().getMatrix()
+            previousTransformArray = np.array(previousTransform)
+            outputTransformMatrix = np.matmul(newTransformArray, previousTransformArray)
+            transform.setMatrix(outputTransformMatrix)
+        else:
+            transform.setMatrix(newTransformArray)
+
+        outTi.setTransform(transform)
+        outTi.setTiltAngle(tiltAngle)
+
+
+    def getOutputSetOfTS(self,
+                         inputPtr,
+                         attrName=OUTPUT_TILTSERIES_NAME,
+                         tiltAxisAngle=None,
+                         suffix="") -> SetOfTiltSeries:
+        """ Method to generate output of set of tilt-series.
+        :param inputPtr: input set pointer (TS or tomograms)
+        :param binning: binning factor
+        :param attrName: output attr name
+        :param tiltAxisAngle: Only applies to TS. If not None, the corresponding value of the
+        set acquisition will be updated (xCorr prot)
+        :param suffix: output set suffix
+        """
+        print('entro en getOutputSetOfTS')
+        inputSet = inputPtr.get()
+        outputSet = getattr(self, attrName, None)
+        if outputSet:
+            outputSet.enableAppend()
+        else:
+            outputSet = self._createSetOfTiltSeries(suffix=suffix)
+
+            outputSet.copyInfo(inputSet)
+            if tiltAxisAngle:
+                outputSet.getAcquisition().setTiltAxisAngle(tiltAxisAngle)
+
+            outputSet.setStreamState(Set.STREAM_OPEN)
+
+            # Write set properties, otherwise it may expose the set (sqlite) without properties.
+            outputSet.write()
+
+            self._defineOutputs(**{attrName: outputSet})
+            self._defineSourceRelation(inputPtr, outputSet)
+
+        
+    def createOutputFailedTs(self, tsId: str):
+        logger.info(cyanStr(f'Failed TS ---> {tsId}'))
+        try:
+            with self._lock:
+                ts = self.getTsFromTsId(tsId, doLock=False)
+                inTsSet = self._getInTsSet()
+                outTsSet = self.getOutputFailedSetOfTiltSeries(inTsSet)
+                newTs = TiltSeries()
+                newTs.copyInfo(ts)
+                outTsSet.append(newTs)
+                newTs.copyItems(ts)
+                newTs.write()
+                outTsSet.update(newTs)
+                outTsSet.write()
+                self._store(outTsSet)
+                # Close explicitly the outputs (for streaming)
+                outTsSet.close()
+        except Exception as e:
+            logger.error(redStr(f'tsId = {tsId} -> Unable to register the failed output with '
+                                f'exception {e}. Skipping... '))
+            logger.error(traceback.format_exc())
+
+    def getOutputFailedSetOfTiltSeries(self, inputSet):
+        failedTsSet = getattr(self, FAILED_TS, None)
+        if failedTsSet:
+            failedTsSet.enableAppend()
+        else:
+            failedTsSet = SetOfTiltSeries.create(self._getPath(), template='tiltseries', suffix='Failed')
+            failedTsSet.copyInfo(inputSet)
+            failedTsSet.setDim(inputSet.getDim())
+            failedTsSet.setStreamState(Set.STREAM_OPEN)
+
+            self._defineOutputs(**{FAILED_TS: failedTsSet})
+            self._defineSourceRelation(self._getInTsSet(), failedTsSet)
+
+        return failedTsSet
+    
+    def getTsFromTsId(self,
+                      tsId: str,
+                      doLock: bool = True) -> TiltSeries:
+        tsSet = self._getInTsSet()
+        if doLock:
+            with self._lock:
+                return tsSet.getItem(TiltSeries.TS_ID_FIELD, tsId)
+        else:
+            return tsSet.getItem(TiltSeries.TS_ID_FIELD, tsId)
+    
 
     # --------------------------- INFO functions ------------------------------
     def _validate(self) -> List[str]:
@@ -319,7 +374,6 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             self.info(cyanStr('No tilt-series have been processed yet'))
             
     # --------------------------- UTILS functions -----------------------------
-
     @staticmethod
     def _getTrDataEnabled(stackIndex: int,
                           alignmentMatrix: np.ndarray,
@@ -338,8 +392,22 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             newTransformArray = IDENTITY_MATRIX
         return tiltAngle, newTransformArray
 
+    def formatAngleList(tltFilePath):
+        """ This method takes an IMOD-based angle file path and
+        returns a list containing the angles for each tilt-image
+        belonging to the tilt-series. """
+
+        angleList = []
+
+        with open(tltFilePath) as f:
+            tltText = f.read().splitlines()
+            for line in tltText:
+                angleList.append(float(line))
+
+        return angleList
+
     def getTltFilePath(self, tsId):
-        return self._getExtraOutFile(tsId, suffix="", ext=RAWTLT_EXT)
+        return self._getExtraOutFile(tsId, suffix="", ext=TLT_EXT)
 
     @staticmethod
     def _getOutTsFileName(tsId, suffix=None, ext=MRC_EXT):
