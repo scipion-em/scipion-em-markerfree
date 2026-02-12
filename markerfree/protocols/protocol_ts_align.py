@@ -391,6 +391,7 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             newTransformArray = IDENTITY_MATRIX
         return tiltAngle, newTransformArray
 
+    @staticmethod
     def formatAngleList(tltFilePath):
         """ This method takes an IMOD-based angle file path and
         returns a list containing the angles for each tilt-image
