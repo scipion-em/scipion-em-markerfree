@@ -222,7 +222,7 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             tiltAngles = self.formatAngleList(tltFn)
             print(tiltAngles)
             # Set of tilt-series
-            outTsSet = self.getOutputSetOfTS(self._getInTsSet())
+            outTsSet = self.getOutputSetOfTS(self._getInTsSet(True))
 
             # Tilt-series
             outTs = TiltSeries()
