@@ -308,6 +308,8 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
 
             self._defineOutputs(**{attrName: outputSet})
             self._defineSourceRelation(inputPtr, outputSet)
+        
+        return outputSet
 
         
     def createOutputFailedTs(self, tsId: str):
