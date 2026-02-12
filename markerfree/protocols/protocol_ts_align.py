@@ -170,14 +170,13 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
                 makePath(tsIdPath)
                 tltFn = os.path.join(tsIdPath, tsId + ".tlt")
                 ts.generateTltFile(tltFilePath = tltFn)
-                cmd = "Markerfree "
                 # Input TS
                 # TODO: Change for getFirstEnableItem() when TODO tomo is updated
-                cmd += "-i %s " % ts.getFirstItem().getFileName()
+                args = "-i %s " % ts.getFirstItem().getFileName()
                 # Output MRC
-                cmd += "-o %s " % self._getExtraOutFile(tsId, "aligned", MRC_EXT) #self._getExtraPath(tsId, tsId + "_aligned.mrc")
+                args += "-o %s " % self._getExtraOutFile(tsId, "aligned", MRC_EXT) #self._getExtraPath(tsId, tsId + "_aligned.mrc")
                 # Tilt angle file
-                cmd += "-a %s " % tltFn
+                args += "-a %s " % tltFn
                 # Geometry -g offset, tilt axis angle, z-axis offset, 
                 # thickness, projection matching reconstruction thickness, 
                 # output image downsampling ratio, GPU ID
@@ -188,14 +187,14 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
                 projThickness = self.geomReconThickness.get()
                 dsRatio = self.geomDownsample.get()
                 gpuId = 0 #TODO
-                cmd += "-g %d,%d,%d,%d,%d,%d,%d " % (offset, taAngle, zaOffset, thickness,
+                args += "-g %d,%d,%d,%d,%d,%d,%d " % (offset, taAngle, zaOffset, thickness,
                                                      projThickness, dsRatio, gpuId)
                 # The number of images used during the projection matching
-                cmd += "-p %d " % self.nProjs.get()
+                args += "-p %d " % self.nProjs.get()
                 # -s1 means that an xf file will be generated
-                cmd += "-s 1 "
+                args += "-s 1 "
 
-                Plugin.runMarkerfree(self, cmd)
+                Plugin.runMarkerfree(self, args)
             except Exception as e:
                 self.failedItems.append(tsId)
                 logger.error(redStr(f'tsId = {tsId} -> MarkerFree execution failed with the exception -> {e}'))
@@ -223,7 +222,7 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             tiltAngles = self.formatAngleList(tltFn)
             print(tiltAngles)
             # Set of tilt-series
-            outTsSet = self.getOutputSetOfTS(self._getInTsSet())
+            outTsSet = self.getOutputSetOfTS(self._getInTsSet(True))
 
             # Tilt-series
             outTs = TiltSeries()
@@ -309,6 +308,8 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
 
             self._defineOutputs(**{attrName: outputSet})
             self._defineSourceRelation(inputPtr, outputSet)
+        
+        return outputSet
 
         
     def createOutputFailedTs(self, tsId: str):
@@ -392,6 +393,7 @@ class ProtMarkerfreeAlignTiltSeries(EMProtocol, ProtTomoBase, ProtStreamingBase)
             newTransformArray = IDENTITY_MATRIX
         return tiltAngle, newTransformArray
 
+    @staticmethod
     def formatAngleList(tltFilePath):
         """ This method takes an IMOD-based angle file path and
         returns a list containing the angles for each tilt-image

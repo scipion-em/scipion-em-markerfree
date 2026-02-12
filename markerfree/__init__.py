@@ -42,7 +42,7 @@ class Plugin(pwem.Plugin):
     _validationMsg = None
 
     @classmethod
-    def _devineVariables(cls):
+    def _defineVariables(cls):
         cls._defineEmVar(MARKERFREE_HOME, cls._getMarkerfreeFolder(DEFAULT_VERSION))
         cls._defineVar(MARKERFREE_ENV_ACTIVATION, MARKERFREE_DEFAULT_ACTIVATION_CMD)
         cls._defineVar(MARKERFREE_CUDA_LIB, pwem.Config.CUDA_LIB)
@@ -128,5 +128,5 @@ class Plugin(pwem.Plugin):
         #cmd += cls.getMarkerfreeEnvActivation() + " "
         # cmd += f"&& export PATH={cls.getHome('build/bin')}:PATH "
         # cmd += f"&& {TSALIGN_PROGRAM}"
-        cmd = "Markerfree"
+        cmd = cls._getProgram(MARKERFREE_CMD)
         protocol.runJob(cmd, args, env=cls.getEnviron(), cwd=cwd, numberOfMpi=1)
